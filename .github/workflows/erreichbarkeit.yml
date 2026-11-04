@@ -1,0 +1,73 @@
+# Erreichbarkeit vipwell.club aus den Ländern der Kunden — alle 15 Minuten (Globalping).
+# Störung → Issue «Störung …» (Mail an Laurin8 + alle, die das Repo beobachten) und roter
+# Lauf; jede weitere gestörte Messung kommt als Kommentar dazu, wieder erreichbar → Issue zu.
+# Die Issues sind damit das Störungsprotokoll mit Uhrzeit und Land.
+# Vorlage: Tailored-Intelligence/vipwell → tools/monitoring/ (dort ändern, hierher kopieren).
+name: Erreichbarkeit
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: erreichbarkeit
+
+jobs:
+  messen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      TZ: Europe/Zurich
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - id: messung
+        run: node erreichbarkeit.mjs
+        continue-on-error: true
+
+      - name: Issue eröffnen, ergänzen oder schliessen
+        if: hashFiles('ergebnis.json') != ''
+        run: |
+          offen=$(gh issue list --label stoerung --state open --json number -q '.[0].number')
+          stoerung=$(node -p "require('./ergebnis.json').stoerung")
+          node -p "require('./ergebnis.json').bericht" > bericht.md
+          if [ "$stoerung" = "true" ]; then
+            if [ -n "$offen" ]; then
+              gh issue comment "$offen" --body-file bericht.md
+            else
+              laender=$(node -p "require('./ergebnis.json').laender.join(', ')")
+              gh label create stoerung --color d73a4a --description "vipwell.club nicht erreichbar" 2>/dev/null || true
+              gh issue create --title "Störung: vipwell.club aus $laender nicht erreichbar" \
+                --label stoerung --assignee Laurin8 --body-file bericht.md
+            fi
+          elif [ -n "$offen" ]; then
+            gh issue comment "$offen" --body "✅ Wieder überall erreichbar — $(date '+%d.%m.%Y %H:%M') (Zürich)"
+            gh issue close "$offen"
+          fi
+
+      # GitHub stoppt Zeitpläne öffentlicher Repos nach 60 Tagen ohne Commit — einmal pro
+      # Woche (Montag 06:00–06:14) den letzten Lauf festhalten.
+      - name: Repo aktiv halten
+        if: github.event_name == 'schedule'
+        run: |
+          if [ "$(date +%u%H)" = "106" ] && [ "$(date +%-M)" -lt 15 ]; then
+            date '+%d.%m.%Y %H:%M (Zürich)' > letzter-lauf.txt
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add letzter-lauf.txt
+            git commit -m "chore: weekly keepalive" && git push
+          fi
+
+      - name: Lauf rot bei Störung
+        if: steps.messung.outcome == 'failure'
+        run: exit 1
